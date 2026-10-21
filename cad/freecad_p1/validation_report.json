@@ -1,0 +1,65 @@
+{
+  "freecad": "1.0.0",
+  "preset": "one_quarter",
+  "fully_constrained_sketches": 22,
+  "base_size_mm": [
+    214.95890541790487,
+    64.0,
+    27.0
+  ],
+  "extraction_stroke_mm": 78.40445270895245,
+  "intentional_upper_jaw_nominal_tip_overlap_mm3": 0.7489556886157851,
+  "nominal_10mm_thumb_head_clearance": "passed",
+  "continuous_core_extraction": "passed",
+  "upward_release_with_jaw_set_aside": "passed",
+  "print_meshes": {
+    "Base.stl": {
+      "triangles": 998,
+      "size_mm": [
+        214.9589,
+        64.0,
+        27.0
+      ]
+    },
+    "CoreCarriage.stl": {
+      "triangles": 4240,
+      "size_mm": [
+        40.7748,
+        22.2481,
+        106.4044
+      ]
+    },
+    "TipCassette.stl": {
+      "triangles": 1532,
+      "size_mm": [
+        12.0,
+        18.0,
+        14.8
+      ]
+    },
+    "UpperJaw.stl": {
+      "triangles": 1500,
+      "size_mm": [
+        12.0,
+        24.0,
+        8.0
+      ]
+    }
+  },
+  "native_reopen": "passed",
+  "step_roundtrip_solids": 4,
+  "live_parameter_change_after_reopen": "passed",
+  "king_size_base_length_mm": 272.79725151391824,
+  "macro_sha256": "92b75a9dad89a0436af531000dca5514aca5fc2bed8008309dfa30c3b692e898",
+  "physical_tests": "not performed",
+  "paper_fit": "unverified composite cylinder/cone; reference envelope only",
+  "final_gui_document_reopened": "passed",
+  "file_sha256": {
+    "Base.stl": "1c7282c8b8da9d40fda779e60e3970335c60d40a8e9785b1e7c09fbc06e1dbf1",
+    "ConeTip_P1.FCStd": "b08e36a48d1de56e9f99a7dc97d94caa2528ae77e8707add9ea3a8e0838de9c6",
+    "ConeTip_P1_assembly.step": "a3c480812856be37816c32dac4d9b712aec5d410d61ae32662f1e083c0d1116a",
+    "CoreCarriage.stl": "749416d0f7473601596925932d0044d5b83b426ef40d576992479ff297bd6e3d",
+    "TipCassette.stl": "0a42ee45496e7f623acb696c8550590a0edb410931f9f3c733a27d60870545c9",
+    "UpperJaw.stl": "a6af2ed6d0f8ac4385003c2e978e7d387f96763b29f48532e1e3af41516c0ea4"
+  }
+}

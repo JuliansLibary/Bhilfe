@@ -1,0 +1,439 @@
+# -*- coding: utf-8 -*-
+"""ConeTip P1: native FreeCAD model, no add-ons or Python feature proxies.
+
+Run as a FreeCAD macro. Every run creates a NEW document. Existing documents
+and files are preserved. Edit the green Spreadsheet cells and recompute.
+Prototype geometry only: actual paper fit, clamping and extraction need trials.
+"""
+
+import math
+from pathlib import Path
+
+import FreeCAD as App
+import Part
+import Sketcher
+
+
+PAPER_FORMAT = "one_quarter"  # or "king_size_slim"
+EPS = 0.02
+
+
+def value(sheet, alias):
+    result = getattr(sheet, alias)
+    return float(result.Value if hasattr(result, "Value") else result)
+
+
+def spreadsheet(doc, preset):
+    if preset not in ("one_quarter", "king_size_slim"):
+        raise ValueError("Unknown paper format: " + preset)
+    long = preset == "king_size_slim"
+    sheet = doc.addObject("Spreadsheet::Sheet", "Parameters")
+    sheet.Label = "Parameter — grün: Eingaben, blau: berechnet"
+    rows = [
+        ("PaperLength", "110 mm" if long else "78 mm", "Papierlänge; reale Blätter messen"),
+        ("PaperWidth", "44 mm", "Papierbreite; keine bestätigte Passung der Mischkontur"),
+        ("GlueWidth", "4 mm", "Klebestreifen, Annahme"),
+        ("CoveredTarget", "98 mm" if long else "68 mm", "Nominelle papierbedeckte Zielzone"),
+        ("TipDiameter", "6 mm", "Nominaler vorgerollter zylindrischer Tip"),
+        ("TipLength", "18 mm", "Tip-Gesamtlänge"),
+        ("TipExposed", "3 mm", "Papierfreie Zone an jeder Umfangsposition erforderlich"),
+        ("ClampLength", "2 mm", "Äußerer Kontakt; kein Stift im Tip"),
+        ("JointGap", "0.15 mm", "Spalt zwischen Tip-Stirnfläche und Kern"),
+        ("WideDiameter", "12 mm", "Kerndurchmesser am Ende der nominalen Körperzone"),
+        ("EndAllowance", "2 mm", "Werkzeugreserve hinter angenommener Papierhülle"),
+        ("AxisHeight", "35 mm", "Nominelle gemeinsame Achshöhe"),
+        ("ClampCompression", "0.04 mm", "Radiale Zustellung NUR obere Sitzkontur; Versuchswert, keine Kraftangabe"),
+        ("GuideClearance", "0.4 mm", "Nominales Führungsspiel; Passungsprobe erforderlich"),
+        ("EdgeChamfer", "0.08 mm", "Nur entgraten; höchstens 0,1 mm für max. 0,2 mm Durchmessersprung"),
+        ("Extraction", "0 mm", "ZUSTAND: 0 = Wickeln; bis Stroke = herausgezogen"),
+        ("JawLift", "0 mm", "ZUSTAND: 0 = geschlossen; 12 mm = Oberbacke abgehoben"),
+        ("JawSide", "0 mm", "ZUSTAND: nach Abheben 30 mm = Oberbacke seitlich abgelegt"),
+        ("EmbeddedTip", "=TipLength-TipExposed", "Nominale Einbettung"),
+        ("BodyLength", "=CoveredTarget-EmbeddedTip", "Kegelzone ohne Tip"),
+        ("CoreStart", "=TipLength+JointGap", "Stumpfer Kernbeginn"),
+        ("TargetEnd", "=CoreStart+BodyLength", "Nominaler Punkt mit WideDiameter"),
+        ("Slope", "=(WideDiameter-TipDiameter)/(2*BodyLength)", "Radiuszunahme pro axialer Länge"),
+        ("HalfAngle", "=atan(Slope)", "Halber Kegelwinkel"),
+        ("PaperEndBound", "=TipExposed+sqrt(PaperLength^2+PaperWidth^2)", "Konservative Hüllannahme ab Startreferenz, KEIN Abwicklungsbeweis"),
+        ("CoreEnd", "=PaperEndBound+EndAllowance", "Formfläche bis Hüllannahme plus Reserve"),
+        ("CoreLength", "=CoreEnd-CoreStart", "Gesamte verlängerte Kernfläche"),
+        ("CoreEndRadius", "=TipDiameter/2+(CoreEnd-CoreStart)*Slope", "Tatsächlicher weiter Kern-Endradius"),
+        ("NeckRadius", "=CoreEndRadius+0.8 mm", "Steifes breites Ende"),
+        ("GripRadius", "=NeckRadius+3 mm", "Breiter Griff"),
+        ("NeckLength", "12 mm", "Schaftzone außerhalb Papierhülle"),
+        ("GripLength", "18 mm", "Griff und Schlittenanbindung"),
+        ("ToolEnd", "=CoreEnd+NeckLength+GripLength", "Hinterstes Werkzeugende"),
+        ("ParkStart", "=CoreEnd+6 mm", "Vorderer mechanischer Schlittenanschlag"),
+        ("SliderLength", "18 mm", "Schlittenlänge"),
+        ("Stroke", "=CoreLength+2 mm", "Hub bis Kern ganz hinter Papier-Hüllannahme"),
+        ("RailEnd", "=ParkStart+SliderLength+Stroke+2 mm", "Vollständige gefangene Führung"),
+        ("BaseEnd", "=RailEnd+3 mm", "Hinteres Basisende"),
+        ("BaseLength", "=BaseEnd+13 mm", "Drucklänge der einteiligen Basis"),
+        ("BaseWidth", "64 mm", "Breite der Basis"),
+        ("Floor", "5 mm", "Basisboden"),
+        ("SeatHeight", "=AxisHeight-8 mm", "Auflagefläche Tip-Kassette"),
+        ("BoreRadius", "=TipDiameter/2-ClampCompression", "Nur obere Sitzkontur; unterer Halbkreis bleibt nominal und öffnet frei"),
+        ("GuideC", "=GuideClearance/2", "Spielanteil für einzelne Führungsflanken"),
+    ]
+    sheet.set("A1", "Parameter")
+    sheet.set("B1", "Wert")
+    sheet.set("C1", "Bedeutung / Einschränkung")
+    derived = False
+    for row, (alias, content, note) in enumerate(rows, 2):
+        if alias == "EmbeddedTip":
+            derived = True
+        sheet.set("A" + str(row), alias)
+        sheet.set("B" + str(row), content)
+        sheet.setAlias("B" + str(row), alias)
+        sheet.set("C" + str(row), note)
+        sheet.setBackground("B" + str(row), (0.83, 0.91, 1.0) if derived else (0.84, 0.96, 0.84))
+    sheet.setColumnWidth("A", 180)
+    sheet.setColumnWidth("B", 130)
+    sheet.setColumnWidth("C", 570)
+    doc.recompute()
+    return sheet
+
+
+def validate_parameters(p):
+    failures = []
+    if not 3 <= value(p, "TipDiameter") <= 10:
+        failures.append("TipDiameter muss zwischen 3 und 10 mm liegen")
+    if not 12 <= value(p, "TipLength") <= 25:
+        failures.append("TipLength muss zwischen 12 und 25 mm liegen")
+    if value(p, "TipExposed") < value(p, "ClampLength") + 0.5:
+        failures.append("Mindestens 0,5 mm Abstand zwischen Klemme und Papierstart nötig")
+    if value(p, "EmbeddedTip") < 10:
+        failures.append("Zu wenig nominelle Tip-Einbettung")
+    if value(p, "BodyLength") < 25 or value(p, "CoreEnd") <= value(p, "TargetEnd"):
+        failures.append("Ungültiges Körperlängenbudget")
+    if value(p, "WideDiameter") <= value(p, "TipDiameter"):
+        failures.append("WideDiameter muss größer als TipDiameter sein")
+    if not 0 <= value(p, "ClampCompression") <= 0.15:
+        failures.append("ClampCompression nur als Versuchswert zwischen 0 und 0,15 mm")
+    if not 0.2 <= value(p, "GuideClearance") <= 0.8:
+        failures.append("GuideClearance zwischen 0,2 und 0,8 mm wählen")
+    if not 0 < value(p, "EdgeChamfer") <= 0.1:
+        failures.append("EdgeChamfer zwischen 0 und 0,1 mm, damit der Tip-Übergang bündig bleibt")
+    if not 0 <= value(p, "Extraction") <= value(p, "Stroke"):
+        failures.append("Extraction muss zwischen 0 und Stroke liegen")
+    if not 0 <= value(p, "JawLift") <= 30:
+        failures.append("JawLift zwischen 0 und 30 mm wählen")
+    if not 0 <= value(p, "JawSide") <= 60 or (value(p, "JawSide") > 0 and value(p, "JawLift") < 5):
+        failures.append("Oberbacke erst mindestens 5 mm anheben, dann seitlich ablegen")
+    if value(p, "AxisHeight") < 30:
+        failures.append("AxisHeight mindestens 30 mm für Finger- und Werkzeugfreiraum")
+    if value(p, "CoreEndRadius") + 3 >= value(p, "AxisHeight") - 14:
+        failures.append("Zu wenig Freiraum unter verlängertem Kern")
+    if failures:
+        raise ValueError("\n".join(failures))
+
+
+def expr(number_or_formula, p):
+    if isinstance(number_or_formula, str):
+        quantity = App.Units.Quantity(p.evalExpression(number_or_formula))
+        return float(quantity.Value)
+    return float(number_or_formula)
+
+
+def put_expression(obj, prop, formula):
+    obj.setExpression(prop, "Parameters." + formula if formula.isidentifier() else formula)
+
+
+def profile(body, name, points, p, plane="xy", offset=0):
+    """Fully constrain a polygon, with dimensions linked to Spreadsheet aliases.
+
+    Formula coordinates use Parameters.Alias. Numeric zero uses an axis
+    constraint. No fixed/Block geometry and no transient Python feature object.
+    """
+    sketch = body.newObject("Sketcher::SketchObject", name)
+    coords = [(expr(x, p), expr(y, p)) for x, y in points]
+    for i, (x, y) in enumerate(coords):
+        x2, y2 = coords[(i + 1) % len(coords)]
+        sketch.addGeometry(Part.LineSegment(App.Vector(x, y, 0), App.Vector(x2, y2, 0)), False)
+    for i in range(len(coords)):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % len(coords), 1))
+    for i, ((x, y), formulas) in enumerate(zip(coords, points)):
+        for axis, amount, formula in (("X", x, formulas[0]), ("Y", y, formulas[1])):
+            if abs(amount) < 1e-10 and not isinstance(formula, str):
+                sketch.addConstraint(Sketcher.Constraint("PointOnObject", i, 1, -2 if axis == "X" else -1))
+            else:
+                idx = sketch.addConstraint(Sketcher.Constraint("Distance" + axis, i, 1, amount))
+                if isinstance(formula, str):
+                    sketch.setExpression("Constraints[%d]" % idx, formula)
+    position_sketch(sketch, plane, offset, p)
+    return sketch
+
+
+def position_sketch(sketch, plane, offset, p):
+    if plane == "yz":
+        sketch.Placement.Rotation = App.Rotation(App.Vector(1, 1, 1), 120)
+        prop = "Placement.Base.x"
+    elif plane == "xz":
+        sketch.Placement.Rotation = App.Rotation(App.Vector(1, 0, 0), 90)
+        prop = "Placement.Base.y"
+    else:
+        prop = "Placement.Base.z"
+    if isinstance(offset, str):
+        sketch.setExpression(prop, offset)
+    else:
+        axis = {"xy": "z", "yz": "x", "xz": "y"}[plane]
+        base = sketch.Placement.Base
+        setattr(base, axis, float(offset))
+        sketch.Placement.Base = base
+
+
+def circles(body, name, data, p, plane="xy", offset=0):
+    sketch = body.newObject("Sketcher::SketchObject", name)
+    for x, y, r in data:
+        vals = (expr(x, p), expr(y, p), expr(r, p))
+        i = sketch.addGeometry(Part.Circle(App.Vector(vals[0], vals[1], 0), App.Vector(0, 0, 1), vals[2]), False)
+        for axis, amount, formula in (("X", vals[0], x), ("Y", vals[1], y)):
+            if abs(amount) < 1e-10 and not isinstance(formula, str):
+                sketch.addConstraint(Sketcher.Constraint("PointOnObject", i, 3, -2 if axis == "X" else -1))
+            else:
+                idx = sketch.addConstraint(Sketcher.Constraint("Distance" + axis, i, 3, amount))
+                if isinstance(formula, str):
+                    sketch.setExpression("Constraints[%d]" % idx, formula)
+        idx = sketch.addConstraint(Sketcher.Constraint("Radius", i, vals[2]))
+        if isinstance(r, str):
+            sketch.setExpression("Constraints[%d]" % idx, r)
+    position_sketch(sketch, plane, offset, p)
+    return sketch
+
+
+def feature(body, sketch, name, length, p, pocket=False, reversed=False):
+    obj = body.newObject("PartDesign::Pocket" if pocket else "PartDesign::Pad", name)
+    obj.Profile = sketch
+    if isinstance(length, str):
+        obj.setExpression("Length", length)
+    else:
+        obj.Length = length
+    obj.Reversed = reversed
+    obj.Refine = True
+    sketch.Visibility = False
+    return obj
+
+
+def rect(body, name, x0, x1, y0, y1, p, plane="xy", offset=0):
+    return profile(body, name, [(x0, y0), (x1, y0), (x1, y1), (x0, y1)], p, plane, offset)
+
+
+def make_body(doc, name, label):
+    body = doc.addObject("PartDesign::Body", name)
+    body.Label = label
+    body.addProperty("App::PropertyBool", "PrintPart", "P1")
+    body.PrintPart = True
+    return body
+
+
+def build_base(doc, p):
+    b = make_body(doc, "Base", "01 Basis — Führung und Kassettenaufnahme")
+    sk = rect(b, "BaseOutline", -13, "Parameters.BaseEnd", -32, 32, p)
+    feature(b, sk, "BasePlate", "Parameters.Floor", p)
+    sk = rect(b, "PedestalOutline", -13, "Parameters.ClampLength+1 mm", -12, 12, p, offset="Parameters.Floor")
+    feature(b, sk, "TipPedestal", "Parameters.SeatHeight-Parameters.Floor", p)
+    sk = profile(b, "CassetteDovetailSlot", [
+        (-7.2, "Parameters.SeatHeight-3 mm"), (7.2, "Parameters.SeatHeight-3 mm"),
+        (5.2, "Parameters.SeatHeight"), (5.2, "Parameters.SeatHeight+1 mm"),
+        (-5.2, "Parameters.SeatHeight+1 mm"), (-5.2, "Parameters.SeatHeight")],
+        p, "yz", -13)
+    feature(b, sk, "CassetteSlot", "Parameters.ClampLength+13 mm", p, pocket=True, reversed=True)
+    sk = rect(b, "RailOutline", "Parameters.CoreEnd+2 mm", "Parameters.RailEnd", -14, 14, p, offset="Parameters.Floor")
+    feature(b, sk, "RailHousing", 6, p)
+    sk = profile(b, "GuideSlotProfile", [
+        ("-10 mm-Parameters.GuideC", "Parameters.Floor+0.1 mm"),
+        ("10 mm+Parameters.GuideC", "Parameters.Floor+0.1 mm"),
+        ("5 mm+Parameters.GuideC", 11), ("5 mm+Parameters.GuideC", 15),
+        ("-5 mm-Parameters.GuideC", 15), ("-5 mm-Parameters.GuideC", 11)],
+        p, "yz", "Parameters.ParkStart")
+    feature(b, sk, "CapturedGuideSlot", "Parameters.RailEnd-Parameters.ParkStart+1 mm", p, pocket=True, reversed=True)
+    sk = rect(b, "ParkingBossOutline", "Parameters.ParkStart+4 mm", "Parameters.ParkStart+14 mm", 13.8, 20, p, offset="Parameters.Floor")
+    feature(b, sk, "ParkingBoss", 9, p)
+    sk = circles(b, "ParkingScrewHole", [("Parameters.ParkStart+9 mm", 10.5, 1.7)], p, "xz", 20)
+    feature(b, sk, "ParkingScrewBore", 15, p, pocket=True, reversed=True)
+    sk = profile(b, "ParkingNutSlot", [
+        ("Parameters.ParkStart+9 mm-2.85 mm", 14.1),
+        ("Parameters.ParkStart+9 mm-2.85 mm", 8.855),
+        ("Parameters.ParkStart+9 mm", 7.21),
+        ("Parameters.ParkStart+9 mm+2.85 mm", 8.855),
+        ("Parameters.ParkStart+9 mm+2.85 mm", 14.1)], p, "xz", 19)
+    feature(b, sk, "TopLoadingParkingNutPocket", 3, p, pocket=True, reversed=True)
+    return b
+
+
+def build_core(doc, p):
+    b = make_body(doc, "CoreCarriage", "02 Formkern mit Schlitten — breitwärts ausziehen")
+    sk = profile(b, "MandrelProfile", [
+        ("Parameters.CoreStart", 0),
+        ("Parameters.CoreStart", "Parameters.TipDiameter/2-Parameters.EdgeChamfer"),
+        ("Parameters.CoreStart+Parameters.EdgeChamfer", "Parameters.TipDiameter/2+Parameters.EdgeChamfer*Parameters.Slope"),
+        ("Parameters.CoreEnd", "Parameters.CoreEndRadius"),
+        ("Parameters.CoreEnd+0.5 mm", "Parameters.NeckRadius"),
+        ("Parameters.CoreEnd+Parameters.NeckLength", "Parameters.NeckRadius"),
+        ("Parameters.CoreEnd+Parameters.NeckLength+0.8 mm", "Parameters.GripRadius"),
+        ("Parameters.ToolEnd-0.8 mm", "Parameters.GripRadius"),
+        ("Parameters.ToolEnd", "Parameters.GripRadius-0.8 mm"),
+        ("Parameters.ToolEnd", 0)], p, "xz", 0)
+    sk.setExpression("Placement.Base.z", "Parameters.AxisHeight")
+    rev = b.newObject("PartDesign::Revolution", "TurnedMandrel")
+    rev.Profile = sk
+    rev.ReferenceAxis = (sk, ["H_Axis"])
+    rev.Angle = 360
+    rev.Refine = True
+    sk.Visibility = False
+    sk = profile(b, "CarriageWebProfile", [
+        (-4.8, 10.5), (4.8, 10.5), (4.8, 11.3), (7, 13.5),
+        (7, "Parameters.AxisHeight"), (-7, "Parameters.AxisHeight"),
+        (-7, 13.5), (-4.8, 11.3)], p, "yz", "Parameters.CoreEnd+12 mm")
+    feature(b, sk, "CarriageWeb", 8, p)
+    sk = profile(b, "SliderProfile", [(-9.7, 5.35), (9.7, 5.35), (5, 10.6), (-5, 10.6)], p, "yz", "Parameters.ParkStart")
+    feature(b, sk, "CapturedSlider", "Parameters.SliderLength", p)
+    b.setExpression("Placement.Base.x", "Parameters.Extraction")
+    return b
+
+
+def build_lower(doc, p):
+    b = make_body(doc, "TipCassette", "03 Untere Tip-Kassette — von hinten einschieben")
+    sk = rect(b, "CassetteBodyOutline", -10, "Parameters.ClampLength", -9, 9, p, offset="Parameters.SeatHeight")
+    feature(b, sk, "CassetteBlock", 8, p)
+    sk = profile(b, "CassetteTongueProfile", [
+        (-6.8, "Parameters.SeatHeight-2.8 mm"), (6.8, "Parameters.SeatHeight-2.8 mm"),
+        (4.8, "Parameters.SeatHeight"), (-4.8, "Parameters.SeatHeight")], p, "yz", -10)
+    feature(b, sk, "CassetteDovetail", "Parameters.ClampLength+10 mm", p)
+    sk = circles(b, "LowerTipSeat", [(0, "Parameters.AxisHeight", "Parameters.TipDiameter/2")], p, "yz", "Parameters.ClampLength")
+    feature(b, sk, "LowerSeatPocket", "Parameters.ClampLength", p, pocket=True)
+    sk = circles(b, "JawAlignmentPins", [(-7, -6, 1.4), (-7, 6, 1.4)], p, offset="Parameters.AxisHeight")
+    feature(b, sk, "AlignmentPins", 4, p)
+    sk = circles(b, "LowerClampScrew", [(-5, 0, 1.7)], p, offset="Parameters.AxisHeight")
+    feature(b, sk, "LowerClampScrewHole", 11, p, pocket=True)
+    # M3 nut inserted from the underside before cassette is slid into the base.
+    radius = 5.7 / math.sqrt(3)
+    pts = [(-5 + radius * math.cos(math.radians(30 + i * 60)), radius * math.sin(math.radians(30 + i * 60))) for i in range(6)]
+    sk = profile(b, "ClampNutHex", pts, p, offset="Parameters.AxisHeight-3.5 mm")
+    feature(b, sk, "ClampNutPocket", 7.5, p, pocket=True)
+    return b
+
+
+def build_upper(doc, p):
+    b = make_body(doc, "UpperJaw", "04 Abnehmbare Oberbacke — Schraube lösen, hochheben")
+    sk = rect(b, "UpperJawOutline", -10, "Parameters.ClampLength", -12, 12, p, offset="Parameters.AxisHeight")
+    feature(b, sk, "UpperJawBlock", 8, p)
+    sk = circles(b, "UpperTipSeat", [(0, "Parameters.AxisHeight", "Parameters.BoreRadius")], p, "yz", "Parameters.ClampLength")
+    feature(b, sk, "UpperSeatPocket", "Parameters.ClampLength", p, pocket=True)
+    sk = circles(b, "JawPinHoles", [(-7, -6, 1.65), (-7, 6, 1.65)], p, offset="Parameters.AxisHeight+8 mm")
+    feature(b, sk, "JawAlignmentHoles", 8, p, pocket=True)
+    sk = circles(b, "UpperClampScrew", [(-5, 0, 1.7)], p, offset="Parameters.AxisHeight+8 mm")
+    feature(b, sk, "UpperClampScrewHole", 8, p, pocket=True)
+    b.setExpression("Placement.Base.z", "Parameters.JawLift")
+    b.setExpression("Placement.Base.y", "Parameters.JawSide")
+    return b
+
+
+def references(doc, p):
+    group = doc.addObject("App::DocumentObjectGroup", "References")
+    group.Label = "Referenzen — NICHT drucken, Papierpassung unbestätigt"
+    tip = doc.addObject("Part::Cylinder", "NominalTip")
+    tip.Label = "Tip nominal Ø6 — Klemmübermaß absichtlich nicht verformt dargestellt"
+    tip.setExpression("Radius", "Parameters.TipDiameter/2")
+    tip.setExpression("Height", "Parameters.TipLength")
+    tip.Placement.Rotation = App.Rotation(App.Vector(0, 1, 0), 90)
+    tip.setExpression("Placement.Base.z", "Parameters.AxisHeight")
+    group.addObject(tip)
+    wall = doc.addObject("PartDesign::Body", "PaperEnvelope")
+    wall.Label = "Papier-Bauraumhülle — KEINE reale Abwicklung"
+    group.addObject(wall)
+    sk = profile(wall, "PaperEnvelopeProfile", [
+        ("Parameters.TipExposed", "Parameters.TipDiameter/2"),
+        ("Parameters.CoreStart", "Parameters.TipDiameter/2"),
+        ("Parameters.PaperEndBound", "Parameters.TipDiameter/2+(Parameters.PaperEndBound-Parameters.CoreStart)*Parameters.Slope"),
+        ("Parameters.PaperEndBound", "Parameters.TipDiameter/2+(Parameters.PaperEndBound-Parameters.CoreStart)*Parameters.Slope+0.04 mm"),
+        ("Parameters.CoreStart", "Parameters.TipDiameter/2+0.04 mm"),
+        ("Parameters.TipExposed", "Parameters.TipDiameter/2+0.04 mm")], p, "xz", 0)
+    sk.setExpression("Placement.Base.z", "Parameters.AxisHeight")
+    rev = wall.newObject("PartDesign::Revolution", "PaperEnvelopeRevolution")
+    rev.Profile = sk
+    rev.ReferenceAxis = (sk, ["H_Axis"])
+    rev.Angle = 360
+    sk.Visibility = False
+    return tip, wall
+
+
+def validate_document(doc, collision_check=True):
+    doc.recompute()
+    p = doc.Parameters
+    validate_parameters(p)
+    prints = [doc.Base, doc.CoreCarriage, doc.TipCassette, doc.UpperJaw]
+    for obj in doc.Objects:
+        if obj.TypeId == "Sketcher::SketchObject" and not obj.FullyConstrained:
+            raise RuntimeError("Unconstrained sketch: " + obj.Name)
+        if "Error" in obj.State or "Invalid" in obj.State:
+            raise RuntimeError("Invalid document object: " + obj.Name + " " + str(obj.State))
+    for body in prints:
+        if body.Shape.isNull() or not body.Shape.isValid() or len(body.Shape.Solids) != 1 or body.Shape.Volume <= 0:
+            raise RuntimeError("Invalid print solid: " + body.Name)
+    if collision_check:
+        for i, first in enumerate(prints):
+            for second in prints[i + 1:]:
+                volume = first.Shape.common(second.Shape).Volume
+                if volume > 1e-5:
+                    raise RuntimeError("Print parts collide: %s / %s: %.6f mm³" % (first.Name, second.Name, volume))
+    return prints
+
+
+def create_document(preset=PAPER_FORMAT):
+    doc = App.newDocument("ConeTip_P1")
+    doc.Label = "ConeTip P1 — " + preset + " — Funktionsversuch"
+    p = spreadsheet(doc, preset)
+    validate_parameters(p)
+    try:
+        parts = [build_base(doc, p), build_core(doc, p), build_lower(doc, p), build_upper(doc, p)]
+        tip, wall = references(doc, p)
+        doc.recompute()
+        validate_document(doc)
+        for body, color in zip(parts, [(0.76, 0.79, 0.83), (0.14, 0.49, 0.65), (0.92, 0.62, 0.20), (0.97, 0.72, 0.30)]):
+            for child in body.Group:
+                child.Visibility = False
+            body.Tip.Visibility = True
+            body.Visibility = True
+            if App.GuiUp:
+                body.ViewObject.ShapeColor = color
+                body.Tip.ViewObject.ShapeColor = color
+        if App.GuiUp:
+            tip.ViewObject.ShapeColor = (0.80, 0.71, 0.48)
+            wall.ViewObject.ShapeColor = (0.55, 0.90, 0.90)
+            wall.ViewObject.Transparency = 80
+            import FreeCADGui as Gui
+            Gui.activeDocument().activeView().viewAxonometric()
+            Gui.activeDocument().activeView().fitAll()
+        wall.Visibility = False
+        App.Console.PrintMessage("ConeTip P1 erstellt. Papierpassung, Klemmkraft und Entformung physisch prüfen.\n")
+        return doc
+    except Exception:
+        App.Console.PrintError("P1-Erzeugung fehlgeschlagen; Dokument bleibt zur Diagnose offen.\n")
+        raise
+
+
+def export_bundle(doc, output_directory):
+    """Save native FCStd, assembly STEP and separately oriented print STL files."""
+    import MeshPart
+    directory = Path(output_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    parts = validate_document(doc)
+    doc.saveAs(str(directory / "ConeTip_P1.FCStd"))
+    Part.export(parts, str(directory / "ConeTip_P1_assembly.step"))
+    for body in parts:
+        shape = body.Shape.copy()
+        if body.Name == "CoreCarriage":
+            shape.rotate(App.Vector(0, 0, 0), App.Vector(0, 1, 0), 90)
+        elif body.Name == "UpperJaw":
+            shape.rotate(App.Vector(0, 0, 0), App.Vector(1, 0, 0), 180)
+        box = shape.BoundBox
+        shape.translate(App.Vector(-box.XMin, -box.YMin, -box.ZMin))
+        mesh = MeshPart.meshFromShape(Shape=shape, LinearDeflection=0.035,
+                                      AngularDeflection=0.12, Relative=False)
+        mesh.write(str(directory / (body.Name + ".stl")))
+    return directory
+
+
+if __name__ == "__main__":
+    create_document()

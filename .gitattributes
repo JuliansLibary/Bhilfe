@@ -1,0 +1,4 @@
+# CAD-Exporte bytegenau speichern; nicht als Quelltext zusammenführen.
+*.step binary
+*.stl binary
+*.FCStd binary

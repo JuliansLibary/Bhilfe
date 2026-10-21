@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+*.FCBak
+*.FCStd[0-9]
